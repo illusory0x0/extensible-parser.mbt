@@ -2,7 +2,27 @@
 let intP = @parserc.pint
 
 ///|
-let stringP = @parserc.pstring
+let letterP : Parser[Char] = @parserc.pvalue(fn(ch : Char) {
+  if ch.is_ascii_alphabetic() {
+    Some(ch)
+  } else {
+    None
+  }
+})
+
+///|
+let stringP : Parser[String] = letterP
+  .and_then(letterP.repeat())
+  .map(fn {
+    (x, xs) => {
+      let buf = StringBuilder::new(size_hint=2 * (xs.length() + 1))
+      buf.write_char(x)
+      for x in xs {
+        buf.write_char(x)
+      }
+      buf.to_string()
+    }
+  })
 
 ///|
 let charP = @parserc.pchar
@@ -26,71 +46,89 @@ typealias PlusParser[Repr] = Lazy[Parser[Repr]]
 typealias VarParser[Repr] = Lazy[Parser[Repr]]
 
 ///|
-typealias ExtendedParser[Repr] = Object[(VarParser[Repr], OriginalParser[Repr])]
+typealias ExtendedParser[Repr] = (VarParser[Repr], OriginalParser[Repr])
 
 ///|
-typealias OriginalParser[Repr] = Object[
-  ((LitParser[Repr], PlusParser[Repr]), WholeParser[Repr]),
-]
+typealias OriginalParser[Repr] = (
+  (LitParser[Repr], PlusParser[Repr]),
+  WholeParser[Repr],
+)
 
 ///|
 let spaces : @parserc.Parser[Char, Array[Char]] = @parserc.pchar(' ').repeat()
 
 ///|
-fn originalParser[Repr : AST]() -> OriginalParser[Repr] {
-  fn(p) {
-    // fn x() {
-    //   let wholeP_before = p.force().1.force()
-    //   let litP = intP.map(Repr::lit)
-    //   let plusP = wholeP_before
-    //     .and_then(
-    //       spaces
-    //       .and_then(charP('+'))
-    //       .and_then(spaces)
-    //       .and_then(wholeP_before)
-    //       .omit_first()
-    //       .repeat(),
-    //     )
-    //     .map(fn {
-    //       (x, xs) => xs.fold(init=x, fn(acc, x) { Repr::plus(acc, x) })
-    //     })
-    //   let wholeP = plusP.or_else(litP)
-    //   (plusP, wholeP)
-    // }
+pub fn between[A, B, C](
+  content : Parser[A],
+  left~ : Parser[B],
+  right~ : Parser[C]
+) -> Parser[A] {
+  left.and_then(content).omit_first().and_then(right).omit_second()
+}
 
+///|
+fn originalParser[Repr : AST]() -> Object[OriginalParser[Repr]] {
+  fn(self) {
     Lazy::from_fun(fn() {
-      (
-        (
-          Lazy::from_val(intP.map(Repr::lit)),
-          Lazy::from_fun(fn() {
-            let wholeP_before = p.force().1.force()
-            let plusP = wholeP_before
-              .and_then(
-                spaces
-                .and_then(charP('+'))
-                .and_then(spaces)
-                .and_then(wholeP_before)
-                .omit_first()
-                .repeat(),
-              )
-              .map(fn {
-                (x, xs) => xs.fold(init=x, fn(acc, x) { Repr::plus(acc, x) })
-              })
-            plusP
-          }),
-        ),
-        Lazy::from_fun(fn() {
-          let p = p.force().0
-          let (litP, plusP) = (p.0.force(), p.1.force())
-          let wholeP = plusP.or_else(litP)
-          wholeP
-        }),
-      )
+      let litP = Lazy::from_val(intP.map(Repr::lit))
+      let plusP = Lazy::from_fun(fn() {
+        Parser::new(fn(seq) { 
+          let plusP : Lazy[Parser[Repr]] = self.force().1.lazy_map(fn(wholeP) {
+            between(
+              wholeP
+              .and_then(spaces)
+              .omit_second()
+              .and_then(charP('+'))
+              .omit_second()
+              .and_then(spaces)
+              .omit_second()
+              .and_then(wholeP),
+              left=charP('('),
+              right=charP(')'),
+            ).map(fn { (lhs, rhs) => Repr::plus(lhs, rhs) })
+          })
+          plusP.force().parse(seq)
+        })
+      })
+      let wholeP = Lazy::from_fun(fn() {
+        Parser::new(fn(seq) { 
+          let self = self.force().0
+          let wholeP : Lazy[Lazy[Parser[Repr]]] = self.0.lazy_map(fn(litP) {
+            self.1.lazy_map(fn(plusP) {
+              let wholeP = plusP.or_else(litP)
+              wholeP
+            })
+          })
+          wholeP.lazy_join().force().parse(seq)
+        })
+      })
+      ((litP, plusP), wholeP)
     })
   }
 }
 
-// fn extendedParser[Repr : AST + Var]() ->
+///|
+fn extendedParser[Repr : AST + Var]() -> Object[ExtendedParser[Repr]] {
+  fn extend(self : Lazy[OriginalParser[Repr]]) -> Lazy[ExtendedParser[Repr]] {
+    self.lazy_map(fn(original) {
+      let ((litP, plusP), wholeP) = original
+      let varP = stringP.map(Repr::var)
+      (
+        Lazy::from_val(varP),
+        ((litP, plusP), Lazy::from_fun(fn() { wholeP.force().or_else(varP) })),
+      )
+    })
+  }
+
+  fn from_extend(
+    self : Lazy[ExtendedParser[Repr]]
+  ) -> Lazy[OriginalParser[Repr]] {
+    self.lazy_map(fn(extended) { extended.1 })
+  }
+
+  let originalParser : Object[OriginalParser[Repr]] = originalParser()
+  originalParser.inherit(extend, from_extend)
+}
 
 ///|
 pub type Object[A] (Lazy[A]) -> Lazy[A]
@@ -109,20 +147,19 @@ pub fn Object::inherit[A, B](
   Lazy::compose(ab, Lazy::compose(self._, ba))
 }
 
-
 ///|
-trait AST {
+pub trait AST {
   lit(Int) -> Self
   plus(Self, Self) -> Self
 }
 
 ///|
-trait Var {
+pub trait Var {
   var(String) -> Self
 }
 
 ///|
-type MyString String
+pub type MyString String
 
 ///|
 impl Show for MyString with output(self, logger) {
@@ -161,5 +198,3 @@ fn is_even(n : Int) -> Bool {
     is_odd(n - 1)
   }
 }
-
-

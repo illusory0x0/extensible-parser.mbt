@@ -13,6 +13,13 @@ fn Lazy::lazy_map[A,B](self : Lazy[A], f : (A) -> B) -> Lazy[B] {
   }
 }
 
+fn Lazy::lazy_join[A](self : Lazy[Lazy[A]]) -> Lazy[A] {
+  match self._.val {
+    Value(val) => val 
+    Thunk(fun) => fun() 
+  }
+}
+
 
 fn Lazy::force[A](self : Lazy[A]) -> A {
   match self._.val {
@@ -50,13 +57,3 @@ fn Lazy::force_pair[A,B](self : Lazy[(Lazy[A],Lazy[B])]) -> (A,B) {
   (a.force(),b.force())
 }
 
-fn Lazy::force_tuple[A,B,C](self : Lazy[((Lazy[A],Lazy[B]), Lazy[C])]) -> ((A,B),C) {
-  let ((a,b),c) = self.force()
-  ((a.force(),b.force()),c.force())
-}
-
-// test {
-//   Lazy::fix(fn (rec) {
-
-//   })
-// }
